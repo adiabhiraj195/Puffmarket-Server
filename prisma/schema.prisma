@@ -1,0 +1,671 @@
+// =============================================================================
+// PUFF NFT Marketplace — Prisma Schema
+// =============================================================================
+//
+// DATABASE ROLE
+// -------------
+// This database is a read-optimised CACHE of on-chain state, not the source
+// of truth. Ownership, balances, bids, and prices all live canonically on the
+// EVM chain. The event indexer (backend/src/indexer/index.ts) listens to
+// contract events and writes normalised rows here so the API can serve fast
+// queries without hitting the RPC on every request.
+//
+// If the database and the chain disagree, the CHAIN IS CORRECT. The database
+// will self-correct the next time the relevant event is indexed.
+//
+// AMOUNT FIELDS
+// -------------
+// All PUFF amounts (prices, bids, proceeds) are stored as String, not Decimal
+// or BigInt. Reason: JavaScript's Number type is a 64-bit float, which cannot
+// safely represent integers above 2^53. PUFF uses 18 decimal places, so
+// 1000 PUFF = 1_000_000_000_000_000_000_000 wei — far beyond the safe limit.
+// Strings are parsed with BigInt on the frontend and in the indexer.
+//
+// WALLET ADDRESSES
+// ----------------
+// All Ethereum addresses are stored lowercase (checksummed addresses are
+// normalised to lowercase before insert). Relations between models use
+// walletAddress as the join key for User, not the internal cuid id, so that
+// the indexer can upsert data even before a User row exists (via upsert with
+// create: { walletAddress } on the related User).
+//
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+// Mirrors the two file categories the NFT contract accepts.
+// Controls which media renderer the frontend uses on the detail page.
+enum MediaType {
+  IMAGE
+  VIDEO
+}
+
+// Mirrors the on-chain listing lifecycle:
+//   ACTIVE    → listItem() was called, NFT is available to buy
+//   SOLD      → buyItem() completed, NFT transferred to buyer
+//   CANCELLED → cancelListing() was called by the seller
+enum ListingStatus {
+  ACTIVE
+  SOLD
+  CANCELLED
+}
+
+// Mirrors the on-chain auction lifecycle:
+//   ACTIVE    → createAuction() called, accepting bids
+//   SETTLED   → settleAuction() called after endTime
+//   CANCELLED → cancelAuction() called (only allowed before first bid)
+enum AuctionStatus {
+  ACTIVE
+  SETTLED
+  CANCELLED
+}
+
+// Transfer event type — used to label each row in the Transfer history table
+// so the frontend can show "Minted", "Sale", "Transfer" instead of raw from/to.
+enum TransferType {
+  MINT       // from == address(0)
+  SALE       // transfer originated from a Marketplace Sale event
+  AUCTION    // transfer originated from an Auction AuctionSettled event
+  TRANSFER   // plain safeTransferFrom with no attached marketplace event
+}
+
+// Notification categories — drives the icon and copy shown in the notification
+// dropdown in the UI. Each maps to a Socket.io event the indexer emits.
+enum NotificationType {
+  NFT_SOLD        // seller's NFT was purchased
+  BID_PLACED      // someone bid on your auction
+  OUTBID          // you were outbid on an auction
+  AUCTION_WON     // you won an auction
+  AUCTION_ENDED   // your auction ended with no bids
+  AUCTION_EXTENDED // anti-snipe extension fired on your auction
+}
+
+// =============================================================================
+// USER
+// =============================================================================
+
+// One row per unique wallet address. Created on first SIWE login.
+// The walletAddress is used as the join key across almost every other model
+// so the indexer can write NFT/Listing/Auction data for a wallet that has
+// never logged into the frontend yet (common case: buyer has not logged in
+// but the indexer still needs to record them as the new owner).
+model User {
+  // Internal surrogate key — not exposed in the API except as a reference.
+  id             String   @id @default(cuid())
+
+  // Ethereum wallet address, lowercase, no checksum.
+  // This is the public identity for the user across the whole system.
+  walletAddress  String   @unique
+
+  // Optional display name. Null until the user fills in their profile.
+  username       String?  @unique
+
+  // Short bio shown on the profile page.
+  bio            String?
+
+  // Date of birth.
+  dob            String?
+
+  // URL of the user's profile picture (hosted externally — we don't store images).
+  avatarUrl      String?
+
+  // Whether the user has completed the initial profile setup wizard.
+  // Used to show the "Complete your profile" prompt on first login.
+  profileComplete Boolean @default(false)
+
+  // Timestamps
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // Relations — all resolved from walletAddress
+  nftsOwned      NFT[]           @relation("NFTOwner")
+  nftsCreated    NFT[]           @relation("NFTCreator")
+  listings       Listing[]       @relation("ListingSeller")
+  listingsBought Listing[]       @relation("ListingBuyer")
+  auctions       Auction[]       @relation("AuctionSeller")
+  bids           Bid[]
+  notifications  Notification[]
+  faucetClaims   FaucetClaim[]
+  authNonces     AuthNonce[]
+
+  @@index([walletAddress])
+  @@index([username])
+}
+
+// =============================================================================
+// AUTH — SIWE NONCE
+// =============================================================================
+
+// Stores the one-time nonces used during Sign-In With Ethereum (EIP-4361).
+//
+// Flow:
+//   POST /api/auth/nonce  → creates one row with a random nonce + expiry
+//   POST /api/auth/verify → verifies the nonce, marks used = true, issues JWT
+//
+// Nonces expire after 10 minutes (NONCE_EXPIRY_MINUTES env var).
+// A nonce that has used = true must be rejected even if it hasn't expired,
+// to prevent replay attacks.
+model AuthNonce {
+  id            String   @id @default(cuid())
+
+  // The wallet requesting login. Lowercased.
+  walletAddress String
+
+  // Random string sent to the frontend to include in the SIWE message.
+  nonce         String   @unique
+
+  // Hard expiry timestamp — reject after this even if used = false.
+  expiresAt     DateTime
+
+  // Whether this nonce has already been consumed (used = true → reject forever).
+  used          Boolean  @default(false)
+
+  createdAt     DateTime @default(now())
+
+  user          User     @relation(fields: [walletAddress], references: [walletAddress])
+
+  @@index([walletAddress])
+  @@index([nonce])
+  // Index for the cleanup job that purges expired rows
+  @@index([expiresAt])
+}
+
+// =============================================================================
+// FAUCET CLAIM
+// =============================================================================
+
+// Tracks each call to PuffToken.faucet() indexed from the FaucetClaimed event.
+// Used by the frontend to show the cooldown timer and by analytics to
+// understand faucet usage without querying the chain every time.
+//
+// The on-chain mapping (lastFaucetClaim and hasClaimedBonus) is the source
+// of truth. This table is a cache for fast UI reads.
+model FaucetClaim {
+  id            String   @id @default(cuid())
+
+  walletAddress String
+
+  // Amount of PUFF minted (wei as string).
+  // Includes the new-user bonus on the first claim.
+  amount        String
+
+  // Whether this claim included the one-time new-user bonus (5,000 PUFF extra).
+  includedBonus Boolean  @default(false)
+
+  txHash        String   @unique
+  blockNumber   Int
+  timestamp     DateTime
+
+  user          User     @relation(fields: [walletAddress], references: [walletAddress])
+
+  @@index([walletAddress])
+  @@index([timestamp])
+}
+
+// =============================================================================
+// NFT
+// =============================================================================
+
+// One row per minted token. Written by the indexer when it sees a Minted event
+// from PuffNFT.sol. Also written optimistically by POST /api/media/confirm-mint
+// immediately after the mint tx confirms (before the indexer processes it).
+// The upsert on tokenId makes both write paths safe.
+//
+// The NFT contract does not store pricing, listing status, or bid data —
+// those live in Listing, Auction, and Bid below.
+model NFT {
+  // Internal surrogate key.
+  id              String    @id @default(cuid())
+
+  // On-chain token ID as a string. Zero-padded for consistent sort order.
+  // This is the canonical unique identifier for the token across the whole system.
+  tokenId         String    @unique
+
+  // Address of the NFT contract that minted this token (PuffNFT.sol address).
+  // Stored so the schema can theoretically support multiple NFT contracts in future.
+  contractAddress String
+
+  // IPFS URI returned by tokenURI(tokenId). Example: "ipfs://bafyrei.../metadata.json"
+  // This is immutable — set at mint, never changes.
+  tokenURI        String
+
+  // IPFS CIDs for the three stored assets. Stored separately so the API can
+  // construct gateway URLs without fetching the full metadata JSON from IPFS.
+  metadataCID     String    // CID of the metadata.json file
+  mediaCID        String    // CID of the original image or video file
+  thumbnailCID    String    // CID of the thumbnail (same as mediaCID for images)
+
+  // Controls which renderer the frontend uses: <img> vs <video>.
+  mediaType       MediaType
+
+  // Denormalised from the IPFS metadata JSON for fast search and display.
+  // These are the only metadata fields we copy into Postgres — everything else
+  // is fetched from IPFS on the detail page.
+  name            String
+  description     String?
+
+  // ERC-721 attributes array: [{ trait_type: string, value: string }]
+  // Stored as Json so the API can filter by trait without parsing strings.
+  // Example: [{ "trait_type": "Rarity", "value": "Legendary" }]
+  attributes      Json      @default("[]")
+
+  // Custom properties object from the metadata schema (creator, created_at, etc.)
+  // See Architecture.md §6.2 for the full schema.
+  properties      Json      @default("{}")
+
+  // Current owner. Updated every time a Transfer event is indexed.
+  // This is the fast-read field — do not use it as the authoritative truth
+  // (check the chain for that), but it will be correct within a few seconds
+  // of any transfer.
+  ownerAddress    String
+  owner           User      @relation("NFTOwner", fields: [ownerAddress], references: [walletAddress])
+
+  // Original minter. Set at mint, never changes.
+  // Used to display "Created by" and to route royalty payments on secondary sales.
+  creatorAddress  String
+  creator         User      @relation("NFTCreator", fields: [creatorAddress], references: [walletAddress])
+
+  // Mint transaction hash — links to block explorer.
+  mintTxHash      String
+  mintedAt        DateTime
+
+  // Whether this NFT has been indexed and confirmed on-chain.
+  // Set to false for optimistic writes (confirm-mint API), set to true
+  // when the Minted event is processed by the indexer.
+  confirmed       Boolean   @default(false)
+
+  // Block number at which the mint was confirmed.
+  // Used by the indexer for re-org detection (see Architecture.md §9.5).
+  mintBlockNumber Int?
+
+  // Relations
+  listings        Listing[]
+  auction         Auction?
+  transfers       Transfer[]
+
+  @@index([ownerAddress])
+  @@index([creatorAddress])
+  @@index([contractAddress])
+  // Compound index for the marketplace grid's most common query:
+  // filter by name text search + sort by mintedAt
+  @@index([name, mintedAt])
+}
+
+// =============================================================================
+// LISTING
+// =============================================================================
+
+// One row per listing. A new row is created for each call to
+// Marketplace.listItem(). If a seller re-lists the same NFT after cancelling,
+// a new row is created (the old one stays with status = CANCELLED).
+// The unique constraint on tokenId covers only the ACTIVE listing — a tokenId
+// can appear multiple times if previous listings were SOLD or CANCELLED.
+//
+// Price changes (updatePrice on-chain) update the existing row's price field
+// and append a row to PriceHistory.
+model Listing {
+  id            String        @id @default(cuid())
+
+  // The on-chain token ID this listing is for.
+  // Only one ACTIVE listing per tokenId at a time (enforced by the contract).
+  tokenId       String
+  nft           NFT           @relation(fields: [tokenId], references: [tokenId])
+
+  // The wallet that called listItem().
+  sellerAddress String
+  seller        User          @relation("ListingSeller", fields: [sellerAddress], references: [walletAddress])
+
+  // Listed price in PUFF wei as a string.
+  price         String
+
+  // The ERC-20 payment token address for the listing.
+  paymentToken  String        @default("0x0000000000000000000000000000000000000000")
+
+  // Current lifecycle state. Starts ACTIVE, ends SOLD or CANCELLED.
+  status        ListingStatus @default(ACTIVE)
+
+  // Transaction that created this listing.
+  listTxHash    String        @unique
+
+  // Block number of the listItem() transaction.
+  // Used by the indexer for re-org safety.
+  listBlockNumber Int
+
+  // When the listing was created (from the block timestamp, not server time).
+  createdAt     DateTime
+
+  // Populated when status → SOLD
+  soldAt        DateTime?
+  buyerAddress  String?
+  buyer         User?         @relation("ListingBuyer", fields: [buyerAddress], references: [walletAddress])
+  saleTxHash    String?       // buyItem() transaction hash
+  salePrice     String?       // actual sale price (may differ if updatePrice was called)
+
+  // Populated when status → CANCELLED
+  cancelledAt   DateTime?
+  cancelTxHash  String?
+
+  // Price history — one row appended for each PriceUpdated event on this listing.
+  priceHistory  PriceHistory[]
+
+  @@index([tokenId, status])
+  @@index([sellerAddress])
+  @@index([status])
+  @@index([createdAt])
+  // Index for the marketplace grid sorted by price
+  @@index([status, price])
+}
+
+// =============================================================================
+// PRICE HISTORY
+// =============================================================================
+
+// Append-only log of every price change on a listing.
+// One row is written for the initial listing price and one more for each
+// PriceUpdated event emitted by the Marketplace contract.
+// Used to show a "Price history" chart on the NFT detail page.
+model PriceHistory {
+  id          String   @id @default(cuid())
+
+  listingId   String
+  listing     Listing  @relation(fields: [listingId], references: [id])
+
+  // The price that was set at this point in time (PUFF wei as string).
+  price       String
+
+  // Whether this is the first entry (the initial listing price).
+  isInitial   Boolean  @default(false)
+
+  txHash      String
+  blockNumber Int
+  timestamp   DateTime
+
+  @@index([listingId])
+  @@index([listingId, timestamp])
+}
+
+// =============================================================================
+// AUCTION
+// =============================================================================
+
+// One row per auction. Created when the indexer processes an AuctionCreated
+// event from Auction.sol. Also written optimistically by POST /api/auctions
+// immediately after the createAuction() transaction confirms.
+//
+// The id field is the on-chain auctionId (uint256 as string) — not a cuid —
+// so the indexer can reference it directly without a lookup.
+model Auction {
+  // On-chain auctionId as string (the auto-incrementing uint256 from the contract).
+  id            String        @id
+
+  // The token being auctioned. One ACTIVE auction per tokenId at a time
+  // (enforced by the Auction contract, which takes the NFT into escrow).
+  tokenId       String        @unique
+  nft           NFT           @relation(fields: [tokenId], references: [tokenId])
+
+  // The wallet that called createAuction().
+  sellerAddress String
+  seller        User          @relation("AuctionSeller", fields: [sellerAddress], references: [walletAddress])
+
+  // Minimum first bid in PUFF wei as a string.
+  startPrice    String
+
+  // Current highest bid amount (PUFF wei as string). "0" if no bids placed yet.
+  highestBid    String        @default("0")
+
+  // Wallet address of the current highest bidder. Null if no bids placed yet.
+  highestBidder String?
+
+  // Total number of bids placed. Denormalised count for fast display.
+  bidCount      Int           @default(0)
+
+  // When the auction closes. Can be extended by the anti-snipe mechanism.
+  // Updated in DB when AuctionExtended event is indexed.
+  endTime       DateTime
+
+  // Duration the seller originally chose (stored for display — not used in logic).
+  durationSeconds Int
+
+  // Current lifecycle state.
+  status        AuctionStatus @default(ACTIVE)
+
+  // Transaction that created this auction.
+  createTxHash  String        @unique
+  createBlockNumber Int
+
+  createdAt     DateTime
+
+  // Populated when status → SETTLED
+  settledAt     DateTime?
+  settleTxHash  String?
+  // Final winner — copied from highestBidder at settlement time.
+  winnerAddress String?
+  // Final sale amount — copied from highestBid at settlement time.
+  finalPrice    String?
+
+  // Populated when status → CANCELLED (only possible before first bid).
+  cancelledAt   DateTime?
+  cancelTxHash  String?
+
+  // Relations
+  bids          Bid[]
+  extensions    AuctionExtension[]
+
+  @@index([status])
+  @@index([endTime])
+  @@index([status, endTime])  // "ending_soon" sort on the marketplace grid
+  @@index([sellerAddress])
+  @@index([tokenId])
+}
+
+// =============================================================================
+// AUCTION EXTENSION
+// =============================================================================
+
+// Append-only log of each anti-snipe extension fired on an auction.
+// One row per AuctionExtended event. Used to show "Extended N times" on the
+// auction detail page and as a timeline annotation in the bid history.
+model AuctionExtension {
+  id            String   @id @default(cuid())
+
+  auctionId     String
+  auction       Auction  @relation(fields: [auctionId], references: [id])
+
+  // The new endTime after this extension.
+  newEndTime    DateTime
+
+  // The bid that triggered this extension (foreign key to Bid).
+  triggeredByBidId String? @unique
+  triggeredByBid   Bid?    @relation(fields: [triggeredByBidId], references: [id])
+
+  txHash        String
+  blockNumber   Int
+  timestamp     DateTime
+
+  @@index([auctionId])
+}
+
+// =============================================================================
+// BID
+// =============================================================================
+
+// One row per BidPlaced event from Auction.sol.
+// This is an append-only log — bids are never deleted or updated.
+// The Auction model's highestBid / highestBidder fields are updated on each
+// new bid, but the full history lives here.
+//
+// Refund state is NOT tracked here — the on-chain pendingRefunds mapping is
+// the authoritative source for who has unclaimed PUFF. The frontend should
+// call Auction.pendingRefunds(auctionId, address) directly to check.
+model Bid {
+  id            String   @id @default(cuid())
+
+  auctionId     String
+  auction       Auction  @relation(fields: [auctionId], references: [id])
+
+  // The wallet that placed this bid.
+  bidderAddress String
+  bidder        User     @relation(fields: [bidderAddress], references: [walletAddress])
+
+  // Bid amount in PUFF wei as a string.
+  amount        String
+
+  // Whether this bid is currently the highest. Updated when a higher bid
+  // is placed (previous highest bid's isHighest → false).
+  isHighest     Boolean  @default(true)
+
+  // Whether the bidder has claimed their refund via withdrawRefund().
+  // Indexed from the RefundWithdrawn event.
+  refundClaimed Boolean  @default(false)
+  refundTxHash  String?
+
+  // Chain data for block explorer links and re-org detection.
+  txHash        String   @unique
+  blockNumber   Int
+  timestamp     DateTime
+
+  // Back-reference from AuctionExtension (if this bid triggered an extension)
+  triggeredExtension AuctionExtension?
+
+  @@index([auctionId])
+  @@index([bidderAddress])
+  @@index([auctionId, amount])      // find highest bid in an auction quickly
+  @@index([auctionId, timestamp])   // bid history sorted by time
+}
+
+// =============================================================================
+// TRANSFER
+// =============================================================================
+
+// Append-only log of every ERC-721 Transfer event emitted by PuffNFT.sol.
+// This is the on-chain ownership history for each token — it is exactly what
+// you would get from querying Transfer(from, to, tokenId) events on the chain,
+// but stored here for fast API reads.
+//
+// The `from` field is address(0) for mint events.
+// The `type` field classifies the transfer so the frontend can show
+// "Minted", "Sold for X PUFF", "Transferred" etc. in the history timeline.
+model Transfer {
+  id          String       @id @default(cuid())
+
+  tokenId     String
+  nft         NFT          @relation(fields: [tokenId], references: [tokenId])
+
+  // Sender wallet. "0x0000000000000000000000000000000000000000" for mints.
+  from        String
+
+  // Receiver wallet.
+  to          String
+
+  // Classification — see enum definition above.
+  type        TransferType
+
+  // For SALE and AUCTION transfers: the PUFF amount (wei as string).
+  // Null for plain TRANSFER or MINT events.
+  price       String?
+
+  // The listing or auction ID that caused this transfer (for linking back).
+  listingId   String?
+  auctionId   String?
+
+  txHash      String       @unique
+  blockNumber Int
+  timestamp   DateTime
+
+  @@index([tokenId])
+  @@index([tokenId, timestamp])  // ownership history sorted by time
+  @@index([to])                  // "all NFTs ever received by this wallet"
+  @@index([from])                // "all NFTs ever sent by this wallet"
+}
+
+// =============================================================================
+// NOTIFICATION
+// =============================================================================
+
+// Persisted notification records. The indexer both:
+//   a) emits a real-time Socket.io event to the connected client's room, AND
+//   b) inserts a row here so the user sees the notification on their next login
+//      even if they were not connected at the time.
+//
+// Notifications are fetched on page load from GET /api/users/me/notifications.
+// Marked read when the user opens the notification dropdown.
+model Notification {
+  id            String           @id @default(cuid())
+
+  // The wallet this notification belongs to.
+  walletAddress String
+  user          User             @relation(fields: [walletAddress], references: [walletAddress])
+
+  // Category — drives icon and copy in the UI.
+  type          NotificationType
+
+  // Human-readable message. Generated by the indexer.
+  // Example: "Your NFT 'Sunset #042' sold for 1,000 PUFF"
+  message       String
+
+  // Optional structured payload for the frontend to construct deep links.
+  // Example: { "tokenId": "42", "auctionId": "7", "amount": "1000000..." }
+  payload       Json             @default("{}")
+
+  // Whether the user has seen this notification.
+  read          Boolean          @default(false)
+  readAt        DateTime?
+
+  // The on-chain event that triggered this notification.
+  txHash        String?
+
+  createdAt     DateTime         @default(now())
+
+  @@index([walletAddress])
+  @@index([walletAddress, read])   // unread count badge query
+  @@index([createdAt])
+}
+
+// =============================================================================
+// INDEXER STATE
+// =============================================================================
+
+// Tracks the last processed block number for each contract the indexer watches.
+// Used so the indexer can resume from the correct position after a restart,
+// rather than replaying all events from the beginning of the chain (which would
+// be extremely slow and produce duplicate rows).
+//
+// One row per contract. The indexer updates these rows after processing each
+// batch of events. On startup, the indexer reads these rows to know where to
+// start catching up.
+model IndexerState {
+  id              String   @id @default(cuid())
+
+  // Human-readable label for this contract watcher.
+  // Values: "PuffToken", "PuffNFT", "Marketplace", "Auction"
+  contractName    String   @unique
+
+  // The contract address being watched.
+  contractAddress String
+
+  // The last block whose events have been fully processed and written to DB.
+  // The indexer starts at lastProcessedBlock + 1 on next run.
+  lastProcessedBlock Int   @default(0)
+
+  // Timestamp of the last block processed — for monitoring/alerting.
+  lastProcessedAt DateTime?
+
+  // Total number of events processed by this watcher since it started.
+  // Useful for operational dashboards.
+  totalEventsProcessed Int @default(0)
+
+  updatedAt       DateTime @updatedAt
+
+  @@index([contractAddress])
+}
