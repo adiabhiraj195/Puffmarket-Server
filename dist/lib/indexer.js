@@ -110,8 +110,9 @@ function startIndexer(io) {
                     }
                 }
                 const contractAddress = exports.PUFF_NFT_ADDRESS.toLowerCase();
+                const dbTokenId = `${contractAddress}-${tokenStr}`;
                 const existingNft = await db_1.default.nFT.findUnique({
-                    where: { tokenId: tokenStr }
+                    where: { tokenId: dbTokenId }
                 });
                 if (existingNft) {
                     await db_1.default.nFT.update({
@@ -123,12 +124,12 @@ function startIndexer(io) {
                             mintTxHash: txHash || existingNft.mintTxHash
                         }
                     });
-                    console.log(`[Indexer] Successfully updated NFT details in DB (TokenId: ${tokenStr}, Owner: ${to.toLowerCase()})`);
+                    console.log(`[Indexer] Successfully updated NFT details in DB (TokenId: ${dbTokenId}, Owner: ${to.toLowerCase()})`);
                 }
                 else {
                     await db_1.default.nFT.create({
                         data: {
-                            tokenId: tokenStr,
+                            tokenId: dbTokenId,
                             contractAddress,
                             tokenURI,
                             metadataCID: extractCID(tokenURI),
@@ -147,7 +148,7 @@ function startIndexer(io) {
                             mintBlockNumber: blockNumber
                         }
                     });
-                    console.log(`[Indexer] Successfully inserted new NFT in DB (TokenId: ${tokenStr}, Owner: ${to.toLowerCase()})`);
+                    console.log(`[Indexer] Successfully inserted new NFT in DB (TokenId: ${dbTokenId}, Owner: ${to.toLowerCase()})`);
                 }
                 // Record transfer
                 const isMint = from === "0x0000000000000000000000000000000000000000";
@@ -155,7 +156,7 @@ function startIndexer(io) {
                     where: { txHash },
                     update: {},
                     create: {
-                        tokenId: tokenStr,
+                        tokenId: dbTokenId,
                         from: from.toLowerCase(),
                         to: to.toLowerCase(),
                         type: isMint ? "MINT" : "TRANSFER",
@@ -204,12 +205,13 @@ function startIndexer(io) {
                         data: { walletAddress: sellerAddress.toLowerCase() }
                     });
                 }
+                const dbTokenId = `${nftAddress.toLowerCase()}-${tokenStr}`;
                 // Find the NFT
                 let nft = await db_1.default.nFT.findUnique({
-                    where: { tokenId: tokenStr }
+                    where: { tokenId: dbTokenId }
                 });
                 if (!nft) {
-                    console.log(`[Indexer] NFT not found. Creating placeholder NFT for listed item tokenId: ${tokenStr}`);
+                    console.log(`[Indexer] NFT not found. Creating placeholder NFT for listed item tokenId: ${dbTokenId}`);
                     let tokenURI = "";
                     let imageURI = "";
                     let name = `Puff NFT #${tokenStr}`;
@@ -219,7 +221,8 @@ function startIndexer(io) {
                     let properties = {};
                     let mediaType = "IMAGE";
                     try {
-                        tokenURI = await nftContract.tokenURI(tokenId);
+                        const customNftContract = new ethers_1.ethers.Contract(nftAddress, PUFF_NFT_ABI, provider);
+                        tokenURI = await customNftContract.tokenURI(tokenId);
                         if (tokenURI) {
                             let fetchUrl = tokenURI;
                             if (tokenURI.startsWith("ipfs://")) {
@@ -243,9 +246,13 @@ function startIndexer(io) {
                     catch (err) {
                         console.error(`[Indexer] Failed to fetch NFT details for missing NFT:`, err);
                     }
+                    const hasCollection = await db_1.default.collection.findUnique({
+                        where: { contractAddress: nftAddress.toLowerCase() }
+                    });
+                    const collectionAddress = hasCollection ? nftAddress.toLowerCase() : null;
                     nft = await db_1.default.nFT.create({
                         data: {
-                            tokenId: tokenStr,
+                            tokenId: dbTokenId,
                             contractAddress: nftAddress.toLowerCase(),
                             tokenURI,
                             metadataCID: extractCID(tokenURI),
@@ -260,6 +267,7 @@ function startIndexer(io) {
                             creatorAddress: sellerAddress.toLowerCase(),
                             mintTxHash: txHash || "0x0000000000000000000000000000000000000000000000000000000000000000",
                             mintedAt: timestamp,
+                            collectionAddress,
                             confirmed: false,
                             mintBlockNumber: blockNumber
                         }
@@ -268,7 +276,7 @@ function startIndexer(io) {
                 // Check active listing
                 let activeListing = await db_1.default.listing.findFirst({
                     where: {
-                        tokenId: tokenStr,
+                        tokenId: dbTokenId,
                         status: "ACTIVE"
                     }
                 });
@@ -284,7 +292,7 @@ function startIndexer(io) {
                 else {
                     activeListing = await db_1.default.listing.create({
                         data: {
-                            tokenId: tokenStr,
+                            tokenId: dbTokenId,
                             sellerAddress: sellerAddress.toLowerCase(),
                             price: priceInPuff,
                             paymentToken: paymentToken.toLowerCase(),
@@ -347,12 +355,13 @@ function startIndexer(io) {
                         data: { walletAddress: buyerAddress.toLowerCase() }
                     });
                 }
+                const dbTokenId = `${nftAddress.toLowerCase()}-${tokenStr}`;
                 // Find the NFT
                 let nft = await db_1.default.nFT.findUnique({
-                    where: { tokenId: tokenStr }
+                    where: { tokenId: dbTokenId }
                 });
                 if (!nft) {
-                    console.error(`[Indexer ItemBought] Error: NFT not found in DB for contract: ${nftAddress}, tokenId: ${tokenStr}`);
+                    console.error(`[Indexer ItemBought] Error: NFT not found in DB for contract: ${nftAddress}, tokenId: ${dbTokenId}`);
                     return;
                 }
                 // Update NFT owner address
@@ -365,7 +374,7 @@ function startIndexer(io) {
                 // Update Listing to SOLD
                 const activeListing = await db_1.default.listing.findFirst({
                     where: {
-                        tokenId: tokenStr,
+                        tokenId: dbTokenId,
                         status: "ACTIVE"
                     }
                 });
@@ -385,7 +394,7 @@ function startIndexer(io) {
                         where: { txHash },
                         update: {},
                         create: {
-                            tokenId: tokenStr,
+                            tokenId: dbTokenId,
                             from: activeListing.sellerAddress,
                             to: buyerAddress.toLowerCase(),
                             type: "SALE",
