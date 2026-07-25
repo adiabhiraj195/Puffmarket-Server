@@ -91,12 +91,12 @@ export async function confirmMint(req: any, res: Response) {
             return res.status(401).json({ error: "Unauthorized" });
         }
 
-        const { tokenId, metadataURI, metadata } = req.body;
+        const { tokenId, metadataURI, metadata, contractAddress: reqContractAddress } = req.body;
         if (!tokenId || !metadataURI || !metadata) {
             return res.status(400).json({ error: "Missing required fields: tokenId, metadataURI, metadata" });
         }
 
-        console.log(`[Confirm Mint] Confirming mint for user=${userAddress}, tokenId=${tokenId}`);
+        console.log(`[Confirm Mint] Confirming mint for user=${userAddress}, tokenId=${tokenId}, contract=${reqContractAddress || "default"}`);
 
         const extractCID = (url: string): string => {
             if (!url) return "";
@@ -110,11 +110,18 @@ export async function confirmMint(req: any, res: Response) {
         const mediaCID = extractCID(imageURI);
         const thumbnailCID = extractCID(metadata.thumbnail || imageURI);
         const mediaType = (metadata.type && metadata.type.toLowerCase() === "video") ? "VIDEO" : "IMAGE";
-        const contractAddress = PUFF_NFT_ADDRESS.toLowerCase();
+        const contractAddress = (reqContractAddress || PUFF_NFT_ADDRESS).toLowerCase();
+        const dbTokenId = `${contractAddress}-${tokenId.toString()}`;
+
+        // Check if there is a Collection registered for this contract address
+        const hasCollection = await db.collection.findUnique({
+            where: { contractAddress: contractAddress }
+        });
+        const collectionAddress = hasCollection ? contractAddress : null;
 
         // Idempotent database upsert
         const existingNft = await db.nFT.findUnique({
-            where: { tokenId: tokenId.toString() }
+            where: { tokenId: dbTokenId }
         });
 
         let response;
@@ -132,6 +139,7 @@ export async function confirmMint(req: any, res: Response) {
                     description: metadata.description || existingNft.description,
                     attributes: (metadata.traits || metadata.attributes || []) as any,
                     properties: metadata as any,
+                    collectionAddress,
                     confirmed: true
                 }
             });
@@ -139,7 +147,7 @@ export async function confirmMint(req: any, res: Response) {
         } else {
             response = await db.nFT.create({
                 data: {
-                    tokenId: tokenId.toString(),
+                    tokenId: dbTokenId,
                     contractAddress,
                     tokenURI: metadataURI,
                     metadataCID,
@@ -154,12 +162,14 @@ export async function confirmMint(req: any, res: Response) {
                     creatorAddress: userAddress.toLowerCase(),
                     mintTxHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
                     mintedAt: new Date(),
+                    collectionAddress,
                     confirmed: true,
                     mintBlockNumber: 0
                 }
             });
             console.log(`[Confirm Mint] Created new NFT entry in database: ${response.id}`);
         }
+
 
         const PINATA_GATEWAY = "https://sapphire-keen-aardvark-438.mypinata.cloud/ipfs/";
         const mappedNft = {

@@ -138,6 +138,7 @@ model User {
   notifications  Notification[]
   faucetClaims   FaucetClaim[]
   authNonces     AuthNonce[]
+  collections    Collection[]    @relation("CollectionOwner")
 
   @@index([walletAddress])
   @@index([username])
@@ -293,6 +294,9 @@ model NFT {
   listings        Listing[]
   auction         Auction?
   transfers       Transfer[]
+  collectionAddress String?
+  collection      Collection? @relation("NFTCollection", fields: [collectionAddress], references: [contractAddress])
+
 
   @@index([ownerAddress])
   @@index([creatorAddress])
@@ -669,3 +673,22 @@ model IndexerState {
 
   @@index([contractAddress])
 }
+
+// =============================================================================
+// COLLECTION
+// =============================================================================
+
+model Collection {
+  id              String   @id @default(cuid())
+  contractAddress String   @unique
+  name            String
+  symbol          String
+  ownerAddress    String
+  owner           User     @relation("CollectionOwner", fields: [ownerAddress], references: [walletAddress])
+  nfts            NFT[]    @relation("NFTCollection")
+  createdAt       DateTime @default(now())
+
+  @@index([contractAddress])
+  @@index([ownerAddress])
+}
+

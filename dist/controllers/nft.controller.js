@@ -20,7 +20,11 @@ async function getListings(req, res) {
                 status: "ACTIVE"
             },
             include: {
-                nft: true,
+                nft: {
+                    include: {
+                        collection: true
+                    }
+                },
                 seller: true
             },
             orderBy: {
@@ -41,10 +45,18 @@ async function getListings(req, res) {
             nft: {
                 id: l.nft.id,
                 imageURI: `${PINATA_GATEWAY}${l.nft.mediaCID}`,
-                tokenId: l.nft.tokenId,
+                tokenId: l.nft.tokenId.includes('-') ? l.nft.tokenId.split('-')[1] : l.nft.tokenId,
                 name: l.nft.name,
                 description: l.nft.description,
-                mediaType: l.nft.mediaType
+                mediaType: l.nft.mediaType,
+                contractAddress: l.nft.contractAddress,
+                collectionAddress: l.nft.collectionAddress,
+                collection: l.nft.collection ? {
+                    id: l.nft.collection.id,
+                    name: l.nft.collection.name,
+                    symbol: l.nft.collection.symbol,
+                    contractAddress: l.nft.collection.contractAddress
+                } : null
             },
             seller: {
                 id: l.seller.id,
@@ -82,7 +94,7 @@ async function getUserNfts(req, res) {
             const isListed = nft.listings.length > 0;
             return {
                 id: nft.id,
-                tokenId: nft.tokenId,
+                tokenId: nft.tokenId.includes('-') ? nft.tokenId.split('-')[1] : nft.tokenId,
                 contractAddress: nft.contractAddress,
                 ownerId: nft.owner.id,
                 metadataURI: nft.tokenURI,
@@ -119,10 +131,11 @@ async function addNft(req, res) {
             return res.status(401).json({ error: "Unauthorized" });
         }
         const { tokenId, contractAddress, metadataURI, imageURI, type } = req.body;
+        const normalizedAddress = contractAddress.toLowerCase();
+        const dbTokenId = `${normalizedAddress}-${tokenId}`;
         const isexists = await db_1.default.nFT.findMany({
             where: {
-                contractAddress: contractAddress.toLowerCase(),
-                tokenId,
+                tokenId: dbTokenId,
             }
         });
         if (!isexists || isexists.length === 0) {
@@ -134,10 +147,14 @@ async function addNft(req, res) {
                 const match = url.match(/\/ipfs\/([^\/?#]+)/);
                 return match ? match[1] : url;
             };
+            const hasCollection = await db_1.default.collection.findUnique({
+                where: { contractAddress: normalizedAddress }
+            });
+            const collectionAddress = hasCollection ? normalizedAddress : null;
             const response = await db_1.default.nFT.create({
                 data: {
-                    tokenId,
-                    contractAddress: contractAddress.toLowerCase(),
+                    tokenId: dbTokenId,
+                    contractAddress: normalizedAddress,
                     tokenURI: metadataURI || "",
                     metadataCID: extractCID(metadataURI || ""),
                     mediaCID: extractCID(imageURI || ""),
@@ -149,6 +166,7 @@ async function addNft(req, res) {
                     creatorAddress: userAddress.toLowerCase(),
                     mintTxHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
                     mintedAt: new Date(),
+                    collectionAddress,
                     confirmed: false,
                     mintBlockNumber: 0
                 }
@@ -173,6 +191,7 @@ async function getNftDetails(req, res) {
             },
             include: {
                 owner: true,
+                collection: true,
                 listings: {
                     where: {
                         status: "ACTIVE"
@@ -187,7 +206,7 @@ async function getNftDetails(req, res) {
         const isListed = nft.listings.length > 0;
         const mappedNft = {
             id: nft.id,
-            tokenId: nft.tokenId,
+            tokenId: nft.tokenId.includes('-') ? nft.tokenId.split('-')[1] : nft.tokenId,
             contractAddress: nft.contractAddress,
             ownerId: nft.owner.id,
             metadataURI: nft.tokenURI,
@@ -207,7 +226,14 @@ async function getNftDetails(req, res) {
             name: nft.name,
             description: nft.description,
             attributes: nft.attributes,
-            creatorAddress: nft.creatorAddress
+            creatorAddress: nft.creatorAddress,
+            collectionAddress: nft.collectionAddress,
+            collection: nft.collection ? {
+                id: nft.collection.id,
+                name: nft.collection.name,
+                symbol: nft.collection.symbol,
+                contractAddress: nft.collection.contractAddress
+            } : null
         };
         return res.status(200).json({ success: true, nft: mappedNft });
     }
@@ -393,27 +419,42 @@ async function createListing(req, res) {
         return res.status(400).json({ error: "Missing required fields: tokenId, price" });
     }
     try {
-        const nftContractAddress = (process.env.PUFF_NFT_ADDRESS || "0x0165878a594ca255338adfa4d48449f69242eb8f").toLowerCase();
+        const defaultContractAddress = (process.env.PUFF_NFT_ADDRESS || "0x0165878a594ca255338adfa4d48449f69242eb8f").toLowerCase();
+        let queryTokenId = tokenId.toString();
+        let nftContractAddress = defaultContractAddress;
+        if (queryTokenId.includes('-')) {
+            const parts = queryTokenId.split('-');
+            nftContractAddress = parts[0].toLowerCase();
+        }
+        else {
+            queryTokenId = `${defaultContractAddress}-${queryTokenId}`;
+        }
         let nft = await db_1.default.nFT.findUnique({
-            where: { tokenId: tokenId.toString() }
+            where: { tokenId: queryTokenId }
         });
         if (!nft) {
-            console.log(`[API Listings] NFT not found. Creating placeholder NFT for tokenId: ${tokenId}`);
+            console.log(`[API Listings] NFT not found. Creating placeholder NFT for tokenId: ${queryTokenId}`);
+            // Check if there is a Collection registered for this contract address
+            const hasCollection = await db_1.default.collection.findUnique({
+                where: { contractAddress: nftContractAddress }
+            });
+            const collectionAddress = hasCollection ? nftContractAddress : null;
             nft = await db_1.default.nFT.create({
                 data: {
-                    tokenId: tokenId.toString(),
+                    tokenId: queryTokenId,
                     contractAddress: nftContractAddress,
                     tokenURI: "",
                     metadataCID: "",
                     mediaCID: "",
                     thumbnailCID: "",
                     mediaType: "IMAGE",
-                    name: `Puff NFT #${tokenId}`,
+                    name: `Puff NFT #${queryTokenId.includes('-') ? queryTokenId.split('-')[1] : queryTokenId}`,
                     description: "",
                     ownerAddress: sellerAddress.toLowerCase(),
                     creatorAddress: sellerAddress.toLowerCase(),
                     mintTxHash: txHash || "0x0000000000000000000000000000000000000000000000000000000000000000",
                     mintedAt: new Date(),
+                    collectionAddress,
                     confirmed: false,
                     mintBlockNumber: 0
                 }
@@ -422,7 +463,7 @@ async function createListing(req, res) {
         // Cancel any existing active listing for this tokenId before creating a new one
         await db_1.default.listing.updateMany({
             where: {
-                tokenId: tokenId.toString(),
+                tokenId: queryTokenId,
                 status: "ACTIVE"
             },
             data: {
@@ -433,7 +474,7 @@ async function createListing(req, res) {
         const defaultPaymentToken = "0x0000000000000000000000000000000000000000";
         const listing = await db_1.default.listing.create({
             data: {
-                tokenId: tokenId.toString(),
+                tokenId: queryTokenId,
                 sellerAddress: sellerAddress.toLowerCase(),
                 price: price.toString(),
                 paymentToken: (paymentToken || defaultPaymentToken).toLowerCase(),
