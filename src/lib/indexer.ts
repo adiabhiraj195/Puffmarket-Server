@@ -1,8 +1,10 @@
 import { ethers } from "ethers";
 import db from "./db";
 
-export const PUFF_NFT_ADDRESS = process.env.PUFF_NFT_ADDRESS || "0x0165878a594ca255338adfa4d48449f69242eb8f";
-export const MARKETPLACE_ADDRESS = process.env.MARKETPLACE_ADDRESS || "0xdc64a140aa3e981100a9beca4e685f962f0cf6c9";
+export const PUFF_NFT_ADDRESS = process.env.PUFF_NFT_ADDRESS || "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512";
+export const MARKETPLACE_ADDRESS = process.env.MARKETPLACE_ADDRESS || "0x5FbDB2315678afecb367f032d93F642f64180aa3";
+export const PUFF_TOKEN_ADDRESS = process.env.PUFF_TOKEN_ADDRESS || "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0";
+export const NFT_FACTORY_ADDRESS = process.env.NFT_FACTORY_ADDRESS || "0xCf7Ed3AccA5a467e9e704C703E8D87F634fB0Fc9";
 
 const PUFF_NFT_ABI = [
     "event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)",
