@@ -183,7 +183,7 @@ export function startIndexer(io?: any) {
             try {
 
                 const tokenStr = tokenId.toString();
-                
+
                 let decimals = 18;
                 if (paymentToken && paymentToken !== ethers.ZeroAddress) {
                     try {
@@ -305,7 +305,7 @@ export function startIndexer(io?: any) {
                 if (activeListing) {
                     activeListing = await db.listing.update({
                         where: { id: activeListing.id },
-                        data: { 
+                        data: {
                             price: priceInPuff,
                             paymentToken: paymentToken.toLowerCase()
                         }
@@ -348,7 +348,7 @@ export function startIndexer(io?: any) {
         marketplaceContract.on("ItemBought", async (buyerAddress: string, nftAddress: string, tokenId: any, priceInWei: any, paymentToken: string, event: any) => {
             try {
                 const tokenStr = tokenId.toString();
-                
+
                 let decimals = 18;
                 if (paymentToken && paymentToken !== ethers.ZeroAddress) {
                     try {
