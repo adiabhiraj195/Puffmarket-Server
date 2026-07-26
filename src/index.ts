@@ -9,7 +9,7 @@ import rootRouter from "./routes";
 dotenv.config();
 
 const app = express();
-const PORT = parseInt(process.env.PORT || "5001", 10);
+const PORT = parseInt(process.env.PORT || "10000", 10);
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -21,7 +21,7 @@ const io = new Server(server, {
 
 io.on("connection", (socket) => {
     console.log(`[Socket] Client connected: ${socket.id}`);
-    
+
     socket.on("join:wallet", ({ address }) => {
         if (address) {
             const room = address.toLowerCase();
@@ -57,7 +57,21 @@ app.use((req, res, next) => {
 // Mount MVC API routes under /api
 app.use("/api", rootRouter);
 
+// server.listen(PORT, "0.0.0.0", () => {
+//     console.log(`Server is running on port ${PORT}`);
+//     startIndexer(io);
+// });
 server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server is running on port ${PORT}`);
-    startIndexer(io);
+    console.log(`Server successfully listening on 0.0.0.0:${PORT}`);
+
+    // 3. Run the indexer asynchronously without blocking the startup flow
+    Promise.resolve()
+        .then(() => {
+            console.log("Starting background indexer...");
+            return startIndexer(io);
+        })
+        .catch((err) => {
+            console.error("CRITICAL: Indexer failed to start, but server is staying alive:", err);
+        });
 });
+

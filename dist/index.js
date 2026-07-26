@@ -12,7 +12,7 @@ const indexer_1 = require("./lib/indexer");
 const routes_1 = __importDefault(require("./routes"));
 dotenv_1.default.config();
 const app = (0, express_1.default)();
-const PORT = parseInt(process.env.PORT || "5001", 10);
+const PORT = parseInt(process.env.PORT || "3000", 10);
 const server = http_1.default.createServer(app);
 const io = new socket_io_1.Server(server, {
     cors: {
