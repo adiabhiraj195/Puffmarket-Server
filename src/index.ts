@@ -36,7 +36,7 @@ io.on("connection", (socket) => {
 });
 
 app.use(cors({
-    origin: ["http://localhost:3000", "https://puff-market.vercel.app/"],
+    origin: ["http://localhost:3000", "https://puff-market.vercel.app"],
     credentials: true
 }));
 app.use(express.json());
