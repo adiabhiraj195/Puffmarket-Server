@@ -14,7 +14,7 @@ const PORT = parseInt(process.env.PORT || "10000", 10);
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
-        origin: ["http://localhost:3000"],
+        origin: ["http://localhost:3000", "https://puff-market.vercel.app"],
         credentials: true
     }
 });
