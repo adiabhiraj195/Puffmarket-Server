@@ -36,14 +36,14 @@ io.on("connection", (socket) => {
 });
 
 app.use(cors({
-    origin: ["http://localhost:3000"],
+    origin: ["http://localhost:3000", "https://puff-market.vercel.app/"],
     credentials: true
 }));
 app.use(express.json());
 
 // API Request Logger Middleware
 app.use((req, res, next) => {
-    const start = Date.now();
+    const start = Date.now()
     res.on("finish", () => {
         const duration = Date.now() - start;
         console.log(`[API] ${req.method} ${req.originalUrl} - Status: ${res.statusCode} (${duration}ms)`);
