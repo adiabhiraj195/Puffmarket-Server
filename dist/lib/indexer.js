@@ -7,6 +7,7 @@ exports.NFT_FACTORY_ADDRESS = exports.PUFF_TOKEN_ADDRESS = exports.MARKETPLACE_A
 exports.startIndexer = startIndexer;
 const ethers_1 = require("ethers");
 const db_1 = __importDefault(require("./db"));
+const sse_1 = require("./sse");
 exports.PUFF_NFT_ADDRESS = process.env.PUFF_NFT_ADDRESS || "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512";
 exports.MARKETPLACE_ADDRESS = process.env.MARKETPLACE_ADDRESS || "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 exports.PUFF_TOKEN_ADDRESS = process.env.PUFF_TOKEN_ADDRESS || "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0";
@@ -19,7 +20,7 @@ const MARKETPLACE_ABI = [
     "event ItemListed(address indexed seller, address indexed nftAddress, uint256 indexed tokenId, uint256 price, address paymentToken)",
     "event ItemBought(address indexed buyer, address indexed nftAddress, uint256 indexed tokenId, uint256 price, address paymentToken)"
 ];
-function startIndexer(io) {
+function startIndexer() {
     const rpcUrl = process.env.RPC_URL || "http://127.0.0.1:8545";
     console.log(`[Indexer] Initializing event indexer connecting to ${rpcUrl}...`);
     console.log(`[Indexer] NFT Contract Address: ${exports.PUFF_NFT_ADDRESS}`);
@@ -407,15 +408,13 @@ function startIndexer(io) {
                             timestamp
                         }
                     });
-                    // Emit nft:sold to seller's wallet room via Socket.io
-                    if (io) {
-                        const sellerAddress = activeListing.sellerAddress.toLowerCase();
-                        io.to(sellerAddress).emit("nft:sold", {
-                            tokenId: tokenStr,
-                            price: priceInPuff
-                        });
-                        console.log(`[Indexer ItemBought] Emitted nft:sold to seller's wallet room: ${sellerAddress}`);
-                    }
+                    // Emit nft:sold to seller's wallet via Server-Sent Events (SSE)
+                    const sellerAddress = activeListing.sellerAddress.toLowerCase();
+                    sse_1.sseManager.sendToWallet(sellerAddress, "nft:sold", {
+                        tokenId: tokenStr,
+                        price: priceInPuff
+                    });
+                    console.log(`[Indexer ItemBought] Emitted nft:sold via SSE to seller: ${sellerAddress}`);
                 }
                 else {
                     console.warn(`[Indexer ItemBought] Warning: No active listing found for NFT ${nft.id} when bought.`);

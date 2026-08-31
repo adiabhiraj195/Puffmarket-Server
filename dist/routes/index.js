@@ -9,6 +9,7 @@ const media_routes_1 = __importDefault(require("./media.routes"));
 const nft_routes_1 = __importDefault(require("./nft.routes"));
 const user_routes_1 = __importDefault(require("./user.routes"));
 const collection_routes_1 = __importDefault(require("./collection.routes"));
+const notification_routes_1 = __importDefault(require("./notification.routes"));
 const nft_controller_1 = require("../controllers/nft.controller");
 const auth_1 = require("../middleware/auth");
 const router = express_1.default.Router();
@@ -17,6 +18,7 @@ router.use("/media", media_routes_1.default);
 router.use("/nft", nft_routes_1.default);
 router.use("/users", user_routes_1.default);
 router.use("/collections", collection_routes_1.default);
+router.use("/notifications", notification_routes_1.default);
 // Keep the exact same endpoint mapping: POST /api/listings
 router.post("/listings", auth_1.authenticateToken, nft_controller_1.createListing);
 exports.default = router;

@@ -1,5 +1,6 @@
 import { ethers } from "ethers";
 import db from "./db";
+import { sseManager } from "./sse";
 
 export const PUFF_NFT_ADDRESS = process.env.PUFF_NFT_ADDRESS || "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512";
 export const MARKETPLACE_ADDRESS = process.env.MARKETPLACE_ADDRESS || "0x5FbDB2315678afecb367f032d93F642f64180aa3";
@@ -16,7 +17,7 @@ const MARKETPLACE_ABI = [
     "event ItemBought(address indexed buyer, address indexed nftAddress, uint256 indexed tokenId, uint256 price, address paymentToken)"
 ];
 
-export function startIndexer(io?: any) {
+export function startIndexer() {
     const rpcUrl = process.env.RPC_URL || "http://127.0.0.1:8545";
     console.log(`[Indexer] Initializing event indexer connecting to ${rpcUrl}...`);
     console.log(`[Indexer] NFT Contract Address: ${PUFF_NFT_ADDRESS}`);
@@ -444,15 +445,13 @@ export function startIndexer(io?: any) {
                     });
 
 
-                    // Emit nft:sold to seller's wallet room via Socket.io
-                    if (io) {
-                        const sellerAddress = activeListing.sellerAddress.toLowerCase();
-                        io.to(sellerAddress).emit("nft:sold", {
-                            tokenId: tokenStr,
-                            price: priceInPuff
-                        });
-                        console.log(`[Indexer ItemBought] Emitted nft:sold to seller's wallet room: ${sellerAddress}`);
-                    }
+                    // Emit nft:sold to seller's wallet via Server-Sent Events (SSE)
+                    const sellerAddress = activeListing.sellerAddress.toLowerCase();
+                    sseManager.sendToWallet(sellerAddress, "nft:sold", {
+                        tokenId: tokenStr,
+                        price: priceInPuff
+                    });
+                    console.log(`[Indexer ItemBought] Emitted nft:sold via SSE to seller: ${sellerAddress}`);
                 } else {
                     console.warn(`[Indexer ItemBought] Warning: No active listing found for NFT ${nft.id} when bought.`);
                 }

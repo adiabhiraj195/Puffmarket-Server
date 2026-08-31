@@ -6,35 +6,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
 const dotenv_1 = __importDefault(require("dotenv"));
-const http_1 = __importDefault(require("http"));
-const socket_io_1 = require("socket.io");
 const indexer_1 = require("./lib/indexer");
 const routes_1 = __importDefault(require("./routes"));
 dotenv_1.default.config();
 const app = (0, express_1.default)();
-const PORT = parseInt(process.env.PORT || "3000", 10);
-const server = http_1.default.createServer(app);
-const io = new socket_io_1.Server(server, {
-    cors: {
-        origin: ["http://localhost:3000"],
-        credentials: true
-    }
-});
-io.on("connection", (socket) => {
-    console.log(`[Socket] Client connected: ${socket.id}`);
-    socket.on("join:wallet", ({ address }) => {
-        if (address) {
-            const room = address.toLowerCase();
-            socket.join(room);
-            console.log(`[Socket] Socket ${socket.id} joined wallet room: ${room}`);
-        }
-    });
-    socket.on("disconnect", () => {
-        console.log(`[Socket] Client disconnected: ${socket.id}`);
-    });
-});
+const PORT = parseInt(process.env.PORT || "10000", 10);
 app.use((0, cors_1.default)({
-    origin: ["http://localhost:3000"],
+    origin: ["http://localhost:3000", "https://puff-market.vercel.app"],
     credentials: true
 }));
 app.use(express_1.default.json());
@@ -52,7 +30,15 @@ app.use((req, res, next) => {
 });
 // Mount MVC API routes under /api
 app.use("/api", routes_1.default);
-server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server is running on port ${PORT}`);
-    (0, indexer_1.startIndexer)(io);
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server successfully listening on 0.0.0.0:${PORT}`);
+    // Run the indexer asynchronously without blocking the startup flow
+    Promise.resolve()
+        .then(() => {
+        console.log("Starting background indexer...");
+        return (0, indexer_1.startIndexer)();
+    })
+        .catch((err) => {
+        console.error("CRITICAL: Indexer failed to start, but server is staying alive:", err);
+    });
 });
